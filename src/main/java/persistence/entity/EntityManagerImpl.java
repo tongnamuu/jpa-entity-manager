@@ -1,100 +1,96 @@
 package persistence.entity;
 
 import persistence.entity.context.PersistenceContext;
-import persistence.entity.context.PersistenceContextImpl;
-import persistence.entity.context.PersistenceContextMap;
+import persistence.entity.entry.EntityEntry;
 import persistence.entity.loader.EntityLoader;
 import persistence.entity.persister.EntityPersister;
-import persistence.sql.usecase.CreateSnapShotObject;
+import persistence.sql.usecase.GetFieldFromClass;
 import persistence.sql.usecase.GetFieldValue;
-import persistence.sql.usecase.GetIdDatabaseFieldUseCase;
+import persistence.sql.usecase.GetIdDatabaseField;
 import persistence.sql.usecase.SetFieldValue;
 import persistence.sql.vo.DatabaseField;
 
 public class EntityManagerImpl implements EntityManager {
-
-    private final EntityLoader entityLoader;
+    private final EntityEntry entityEntry;
     private final EntityPersister entityPersister;
-    private final GetIdDatabaseFieldUseCase getIdDatabaseFieldUseCase;
-    private final GetFieldValue getFieldValue;
-    private final SetFieldValue setFieldValue;
-    private final CreateSnapShotObject createSnapShotObject;
-    private final PersistenceContextMap persistenceContextMap;
+    private final EntityLoader entityLoader;
+    private final PersistenceContext persistenceContext;
+    private final GetIdDatabaseField getIdDatabaseField = new GetIdDatabaseField(new GetFieldFromClass());
+    private final GetFieldValue getFieldValue = new GetFieldValue();
+    private final SetFieldValue setFieldValue = new SetFieldValue();
 
 
-    public EntityManagerImpl(EntityLoader entityLoader, EntityPersister entityPersister,
-                             PersistenceContextMap persistenceContextMap,
-                             GetIdDatabaseFieldUseCase getIdDatabaseFieldUseCase,
-                             GetFieldValue getFieldValue,
-                             SetFieldValue setFieldValue,
-                             CreateSnapShotObject createSnapShotObject) {
-        this.entityLoader = entityLoader;
+    public EntityManagerImpl(EntityEntry entityEntry,
+                             EntityPersister entityPersister,
+                             EntityLoader entityLoader,
+                             PersistenceContext persistenceContext) {
+        this.entityEntry = entityEntry;
         this.entityPersister = entityPersister;
-        this.persistenceContextMap = persistenceContextMap;
-        this.getIdDatabaseFieldUseCase = getIdDatabaseFieldUseCase;
-        this.getFieldValue = getFieldValue;
-        this.setFieldValue = setFieldValue;
-        this.createSnapShotObject = createSnapShotObject;
+        this.entityLoader = entityLoader;
+        this.persistenceContext = persistenceContext;
     }
 
     @Override
-    public <T> T find(Class<T> clazz, Long Id) {
-        if (Id == null) {
+    public <T> T find(Class<T>clazz, Long id) {
+        if (id == null || clazz == null) {
             throw new NullPointerException("Id can't be null in EntityManager find");
         }
-        PersistenceContext<T> persistenceContext = getPersistenceContext(clazz);
-        T persistenceContextCachedEntity = persistenceContext.getEntity(Id);
-        if (persistenceContextCachedEntity != null) {
-            return persistenceContextCachedEntity;
+        Object cachedEntity = persistenceContext.getEntity(clazz, id);
+        if (cachedEntity == null) {
+            Object dbEntity = entityLoader.find(clazz, id);
+            if (dbEntity != null) {
+                entityEntry.updateLoading(dbEntity);
+                persistenceContext.addEntity(id, dbEntity);
+                entityEntry.updateManaged(dbEntity);
+                return (T) dbEntity;
+            }
+            return null;
         }
-        T entity = entityLoader.find(clazz, Id);
-        if (entity != null) {
-            persistenceContext.addEntity(Id, entity);
+        if (entityEntry.readAble(cachedEntity)) {
+            return (T) cachedEntity;
         }
-        return entity;
+        throw new IllegalStateException("Object is not readable");
     }
 
     @Override
-    public <T> T persist(T entity) {
-        Object idValue = getFieldValue.execute(entity, getIdDatabaseFieldUseCase.execute(entity.getClass()));
+    public Object persist(Object entity) {
+        Object idValue = getFieldValue.execute(entity, getIdDatabaseField.execute(entity.getClass()));
         if (idValue == null) {
             return insertIfNotExist(entity);
         }
-        T findEntity = (T) find(entity.getClass(), (Long) idValue);
+        Object findEntity = find(entity.getClass(), (Long) idValue);
         if (findEntity == null) {
             return insertIfNotExist(entity);
         }
 
-        return updatetIfAlreadyExist(entity, (Long) idValue);
+        return updateIfAlreadyExist(entity, (Long) idValue);
 
     }
 
-
     @Override
-    public <T> void remove(T entity) {
+    public  void remove(Object entity) {
+        if (entity == null) {
+            throw new NullPointerException("delete with null");
+        }
+        entityEntry.updateDeleted(entity);
         entityPersister.delete(entity);
-        Class<T> cls = (Class<T>) entity.getClass();
-        PersistenceContext<T> persistenceContext = getPersistenceContext(cls);
         persistenceContext.removeEntity(entity);
+        entityEntry.updateGone(entity);
     }
 
     @Override
     public void clear() {
-        persistenceContextMap.clear();
+        persistenceContext.clear();
     }
 
-    private <T> PersistenceContext<T> getPersistenceContext(Class<T> cls) {
-        if (persistenceContextMap.containsKey(cls)) {
-            return (PersistenceContext<T>) persistenceContextMap.get(cls);
+    private Object updateIfAlreadyExist(Object entity, Long idValue) {
+        if (entity == null) {
+            throw new NullPointerException("Can not be update with null");
         }
-        PersistenceContext<T> newContext = new PersistenceContextImpl<T>(getIdDatabaseFieldUseCase, getFieldValue, createSnapShotObject);
-        persistenceContextMap.put(cls, newContext);
-        return newContext;
-    }
-
-    private <T> T updatetIfAlreadyExist(T entity, Long idValue) {
-        PersistenceContext<T> persistenceContext = getPersistenceContext((Class<T>) entity.getClass());
-        T snapshotEntity = persistenceContext.getDatabaseSnapshot(idValue);
+        if(!entityEntry.updateAble(entity)) {
+            throw new IllegalStateException("Can not be update");
+        }
+        Object snapshotEntity = persistenceContext.getDatabaseSnapshot(entity.getClass(), idValue);
         if (entity.equals(snapshotEntity)) {
             return entity;
         }
@@ -104,11 +100,18 @@ public class EntityManagerImpl implements EntityManager {
     }
 
     private <T> T insertIfNotExist(T entity) {
+        if (entity == null) {
+            throw new NullPointerException("insert with null");
+        }
+        if (!entityEntry.insertAble(entity)) {
+            throw new IllegalStateException("Can not be insert");
+        }
+        entityEntry.updateSaving(entity);
         Long id = entityPersister.insert(entity);
-        PersistenceContext<T> persistenceContext = getPersistenceContext((Class<T>) entity.getClass());
-        DatabaseField databaseField = getIdDatabaseFieldUseCase.execute(entity.getClass());
-        setFieldValue.execute(entity, databaseField, id);
         persistenceContext.addEntity(id, entity);
+        entityEntry.updateManaged(entity);
+        DatabaseField databaseField = getIdDatabaseField.execute(entity.getClass());
+        setFieldValue.execute(entity, databaseField, id);
         return entity;
     }
 }

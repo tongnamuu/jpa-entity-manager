@@ -11,16 +11,16 @@ import java.sql.SQLException;
 import jdbc.JdbcTemplate;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import persistence.entity.context.PersistenceContextMap;
+import persistence.entity.context.PersistenceContext;
+import persistence.entity.context.PersistenceContextImpl;
+import persistence.entity.entry.EntityEntry;
 import persistence.entity.loader.EntityLoader;
 import persistence.entity.persister.EntityPersister;
 import persistence.sql.ddl.assembler.DataDefinitionLanguageAssembler;
 import persistence.sql.dml.assembler.DataManipulationLanguageAssembler;
-import persistence.sql.usecase.CreateSnapShotObject;
 import persistence.sql.usecase.GetFieldFromClass;
-import persistence.sql.usecase.GetFieldValue;
-import persistence.sql.usecase.GetIdDatabaseFieldUseCase;
 import persistence.sql.usecase.SetFieldValue;
 
 class EntityManagerTest {
@@ -28,8 +28,10 @@ class EntityManagerTest {
     private final DataDefinitionLanguageAssembler dataDefinitionLanguageAssembler = createDataDefinitionLanguageAssembler();
     private DatabaseServer server;
     private JdbcTemplate jdbcTemplate;
+    private PersistenceContext persistenceContext;
     private EntityPersister entityPersister;
     private EntityLoader entityLoader;
+    private EntityEntry entityEntry;
     private EntityManager entityManager;
 
 
@@ -38,15 +40,15 @@ class EntityManagerTest {
         server = new H2();
         server.start();
         jdbcTemplate = new JdbcTemplate(server.getConnection());
+        persistenceContext = new PersistenceContextImpl();
         entityPersister = new EntityPersister(dataManipulationLanguageAssembler, jdbcTemplate);
         entityLoader = new EntityLoader(new GetFieldFromClass(), new SetFieldValue(), jdbcTemplate, dataManipulationLanguageAssembler);
-        entityManager = new EntityManagerImpl(entityLoader,
+        entityEntry = new EntityEntry();
+        entityManager = new EntityManagerImpl(
+            entityEntry,
             entityPersister,
-            new PersistenceContextMap(),
-            new GetIdDatabaseFieldUseCase(new GetFieldFromClass()),
-            new GetFieldValue(),
-            new SetFieldValue(),
-            new CreateSnapShotObject(new GetFieldFromClass(), new GetFieldValue(), new SetFieldValue())
+            entityLoader,
+            persistenceContext
         );
         jdbcTemplate.execute(dataDefinitionLanguageAssembler.assembleCreateTableQuery(Person.class));
     }
@@ -58,6 +60,7 @@ class EntityManagerTest {
     }
 
     @Test
+    @DisplayName("조회 시 올바른 객체가 나온다.")
     void find() {
         Person person = new Person("tongnamuu", 11, "tongnamuu@naver.com");
         jdbcTemplate.execute(dataManipulationLanguageAssembler.generateInsert(person));
@@ -72,9 +75,10 @@ class EntityManagerTest {
     }
 
     @Test
+    @DisplayName("저장 시 올바른 객체가 나온다.")
     void persist() {
         // when, then
-        Person person = entityManager.persist(new Person("tongnamuu", 11, "tongnamuu@naver.com"));
+        Person person = (Person) entityManager.persist(new Person("tongnamuu", 11, "tongnamuu@naver.com"));
         assertAll(
             () -> assertThat(person.getId()).isEqualTo(1L),
             () -> assertThat(person.getName()).isEqualTo(person.getName()),
@@ -84,6 +88,7 @@ class EntityManagerTest {
     }
 
     @Test
+    @DisplayName("삭제 시 null이 나온다.")
     void remove() {
         // given
         Person person = new Person("tongnamuu", 11, "tongnamuu@naver.com");
@@ -97,5 +102,41 @@ class EntityManagerTest {
         // then
         assertThat(findPerson).isNotNull();
         assertThat(findPerson2).isNull();
+    }
+
+    @Test
+    @DisplayName("업데이트 후 조회하면 업데이트 된 객체가 반환한다.")
+    void test_update_find() {
+        // given
+        Person p = new Person("hello", 21, "hello@naver.com");
+        entityManager.persist(p);
+
+        // when
+        p.updateEmail("test@naver.com");
+        entityManager.persist(p);
+
+        // then
+        Person findPerson = entityManager.find(Person.class, p.getId());
+        assertAll(
+            () -> assertThat(p == findPerson).isTrue(),
+            () -> assertThat(findPerson.getEmail()).isEqualTo("test@naver.com")
+        );
+    }
+
+    @Test
+    @DisplayName("삭제 후 조회하면 null 반환한다.")
+    void test_delete_find() {
+        // given
+        Person p = new Person("hello", 21, "hello@naver.com");
+        entityManager.persist(p);
+
+        // when
+        entityManager.remove(p);
+
+        // then
+        Person findPerson = entityManager.find(Person.class, p.getId());
+        assertAll(
+            () -> assertThat(findPerson).isNull()
+        );
     }
 }
